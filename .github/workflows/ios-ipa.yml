@@ -1,45 +1,76 @@
+
 name: Build iOS IPA
+
 on:
   workflow_dispatch:
     inputs:
       method:
-        description: "unsigned | development | ad-hoc | app-store-connect"
+        description: "Phuong thuc ky IPA"
         required: true
+        type: choice
+        options:
+          - unsigned
+          - development
+          - ad-hoc
+          - app-store-connect
         default: unsigned
 
 jobs:
   ipa:
-    # macos-15 (arm64) thay cho macos-14: GitHub khai tu image macos-14 / macos-15-intel tu 2/11/2026.
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          lfs: true # libiPhone-lib.a (196MB) / libil2cpp.a (65MB) duoc luu bang Git LFS
 
-      # Tai lai vat the LFS va kiem tra file that (tranh truong hop con pointer).
-      - name: Kiem tra thu vien da tai du chua
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Git LFS
+        shell: bash
         run: |
           git lfs pull
-          for lib in Libraries/libiPhone-lib.a Libraries/libil2cpp.a; do
-            if [ "$(head -c 8 "$lib")" != '!<arch>' ]; then
-              echo "::error::$lib khong phai file ar that - chua tai duoc tu Git LFS"
+
+          for lib in \
+            Libraries/libiPhone-lib.a \
+            Libraries/libil2cpp.a
+          do
+            if [ ! -f "$lib" ]; then
+              echo "::error::Missing file: $lib"
               exit 1
             fi
+
+            if [ "$(head -c 8 "$lib")" != '!<arch>' ]; then
+              echo "::error::$lib is not a valid ar archive"
+              exit 1
+            fi
+
+            echo "Verified: $lib"
           done
 
       - name: Show Xcode version
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Check build script
+        run: |
+          test -f ios-build/build-ipa.sh
+          bash -n ios-build/build-ipa.sh
 
       - name: Build IPA
+        shell: bash
         env:
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           BUNDLE_ID: ${{ vars.BUNDLE_ID }}
-        run: bash ios-build/build-ipa.sh "${{ inputs.method }}"
+        run: |
+          bash ios-build/build-ipa.sh "${{ inputs.method }}"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ipa-${{ inputs.method }}
           path: ios-build/out/**/*.ipa
           if-no-files-found: warn
+          retention-days: 7
