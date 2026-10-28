@@ -1,11 +1,9 @@
-
 name: Build iOS IPA
-
 on:
   workflow_dispatch:
     inputs:
       method:
-        description: "Phuong thuc ky IPA"
+        description: Export method
         required: true
         type: choice
         options:
@@ -14,63 +12,69 @@ on:
           - ad-hoc
           - app-store-connect
         default: unsigned
-
 jobs:
   ipa:
     runs-on: macos-15-intel
     timeout-minutes: 120
-
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           lfs: true
-
-      - name: Download Git LFS
+      - name: Download LFS
+        run: git lfs pull
+      - name: Show Xcode
+        run: xcodebuild -version
+      - name: Install signing credentials
+        if: inputs.method != 'unsigned'
         shell: bash
+        env:
+          CERT_B64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          PROFILE_B64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          git lfs pull
-
-          for lib in \
-            Libraries/libiPhone-lib.a \
-            Libraries/libil2cpp.a
-          do
-            if [ ! -f "$lib" ]; then
-              echo "::error::Missing file: $lib"
-              exit 1
-            fi
-
-            if [ "$(head -c 8 "$lib")" != '!<arch>' ]; then
-              echo "::error::$lib is not a valid ar archive"
-              exit 1
-            fi
-
-            echo "Verified: $lib"
-          done
-
-      - name: Show Xcode version
-        run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
-
-      - name: Check build script
-        run: |
-          test -f ios-build/build-ipa.sh
-          bash -n ios-build/build-ipa.sh
-
+          set -euo pipefail
+          : "${CERT_B64:?Missing BUILD_CERTIFICATE_BASE64}"
+          : "${CERT_PASSWORD:?Missing P12_PASSWORD}"
+          : "${PROFILE_B64:?Missing BUILD_PROVISION_PROFILE_BASE64}"
+          : "${KEYCHAIN_PASSWORD:?Missing KEYCHAIN_PASSWORD}"
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          echo "$CERT_B64" | base64 --decode > "$CERT_PATH"
+          echo "$PROFILE_B64" | base64 --decode > "$PROFILE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROVISIONING_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
       - name: Build IPA
         shell: bash
         env:
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           BUNDLE_ID: ${{ vars.BUNDLE_ID }}
-        run: |
-          bash ios-build/build-ipa.sh "${{ inputs.method }}"
-
+        run: bash ios-build/build-ipa.sh "${{ inputs.method }}"
       - name: Upload IPA
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: ipa-${{ inputs.method }}
-          path: ios-build/out/**/*.ipa
+          path: |
+            ios-build/out/*.ipa
+            ios-build/out/ipa/*.ipa
           if-no-files-found: warn
           retention-days: 7
+      - name: Remove signing credentials
+        if: always() && inputs.method != 'unsigned'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/profile.mobileprovision"
